@@ -5,30 +5,80 @@
 # * KEYSTORE_PASS
 # * KEY_PASS
 set -a && source ./.env && set +a
-set -e
+# set -e
+set -eE -o functrace
+failure() {
+  local lineno=$1
+  local msg=$2
+  echo "Failed at $lineno: $msg"
+}
+trap 'failure ${LINENO} "$BASH_COMMAND"' ERR
 
 # Configuration variables
-APP_NAME="MinimalAndroidWorkflowWithoutJava"
-PACKAGE_NAME="com.example.minimal_android_workflow_without_java"
-RUST_PACKAGE_NAME="minimal_android_workflow_without_java"
+APP_NAME="MinimalRustAndroidBevy"
+PACKAGE_NAME="com.example.minimal_rust_android_bevy"
+RUST_PACKAGE_NAME="minimal_rust_android_bevy"
 RUST_ANDROID_TARGET="aarch64-linux-android" # Can be adjusted (e.g., armv7, x86_64)
 ANDROID_TARGET="arm64-v8a"
 SDK_PATH="$HOME/android"
 
 # NDK_VERSION="26.2.11394342" # Adjust as needed
-NDK_VERSION="23.1.7779620"
+# NDK_VERSION="23.1.7779620"
+NDK_VERSION="25.1.8937393"
+# NDK_VERSION="26.2.11394342"  # "25.1.8937393"   # "23.1.7779620"
+NDK_PATH="$SDK_PATH/ndk/$NDK_VERSION"
 OUTPUT_DIR="./output"
 MIN_SDK_VERSION="28"
 TARGET_SDK_VERSION="34"
+PLATFORM_VERSION="33"
+PLATFORM_VERSION2="33"
+BUILD_TOOLS_VERSION="34.0.0"
 
 # Paths to Android tools (ensure they're correct for your environment)
-AAPT2="$SDK_PATH/build-tools/34.0.0/aapt2"
-ZIPALIGN="$SDK_PATH/build-tools/34.0.0/zipalign"
-PLATFORM="$SDK_PATH/platforms/android-31/android.jar"
-APKSIGNER="$SDK_PATH/build-tools/34.0.0/apksigner"
+AAPT2="$SDK_PATH/build-tools/$BUILD_TOOLS_VERSION/aapt2"
+ZIPALIGN="$SDK_PATH/build-tools/$BUILD_TOOLS_VERSION/zipalign"
+APKSIGNER="$SDK_PATH/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+PLATFORM="$SDK_PATH/platforms/android-$PLATFORM_VERSION/android.jar"
+
+HOST_ARCH_FOR_ANDROID="linux-x86_64"
+declare -a TARGETS=("aarch64-linux-android" "armv7-linux-androideabi" "i686-linux-android" "x86_64-linux-android")
 
 # NativeActivity path from NDK
-NATIVE_ACTIVITY_PATH="$SDK_PATH/ndk/$NDK_VERSION/sources/android/native_app_glue"
+NATIVE_ACTIVITY_PATH="$NDK_PATH/sources/android/native_app_glue"
+
+# Generate .cargo/config.toml
+CARGO_CONFIG_PATH=".cargo/config.toml"
+if [ -f $CARGO_CONFIG_PATH ]; then
+    cp $CARGO_CONFIG_PATH "$CARGO_CONFIG_PATH.bak"
+fi
+
+
+# linker = "$NDK_PATH/toolchains/llvm/prebuilt/$HOST_ARCH_FOR_ANDROID/bin/$target$PLATFORM_VERSION-clang"
+
+echo "" > $CARGO_CONFIG_PATH
+for target in "${TARGETS[@]}"
+do
+    LINKER_PATH="$NDK_PATH/toolchains/llvm/prebuilt/$HOST_ARCH_FOR_ANDROID/bin/$target$PLATFORM_VERSION2-clang"
+    # NOTE: Fixes naming difference
+    LINKER_PATH=$(echo "$LINKER_PATH" | sed -r 's/bin\/armv7/bin\/armv7a/g')
+    
+    if [ ! -f $LINKER_PATH ]; then
+        echo "Error, linker does not exist at $LINKER_PATH"
+        exit 255
+    fi
+
+   cat <<EOL >> $CARGO_CONFIG_PATH
+[target.$target]
+linker = "$LINKER_PATH"
+rustflags = [
+    "-Clink-arg=-landroid",
+    "-Clink-arg=-llog",
+    "-Clink-arg=-lOpenSLES",
+    "-C", "strip=symbols",
+]
+EOL
+done
+
 
 # Ensure the output directory exists
 mkdir -p $OUTPUT_DIR
@@ -36,10 +86,13 @@ mkdir -p $OUTPUT_DIR
 rm $OUTPUT_DIR/*.apk -f
 
 # Step 1: Add Android target for Rust if it's not already added
+echo "Checking / adding rust target: $RUST_ANDROID_TARGET"
 rustup target add $RUST_ANDROID_TARGET
 
 # Step 2: Build the Rust project for the specified Android target
-cargo ndk -t $RUST_ANDROID_TARGET --platform $TARGET_SDK_VERSION build --release
+echo "Building using cargo ndk for target $RUST_ANDROID_TARGET and platform $TARGET_SDK_VERSION"
+# cargo ndk -t $RUST_ANDROID_TARGET --platform $TARGET_SDK_VERSION build --release
+cargo ndk -t $RUST_ANDROID_TARGET --platform 33 build --release
 
 # Step 3: Create the APK directory structure
 mkdir -p $OUTPUT_DIR/app/lib/$ANDROID_TARGET
@@ -51,6 +104,9 @@ echo "dummy thing" > $OUTPUT_DIR/app/res/textfile.txt
 
 # Step 4: Copy the Rust compiled shared library to the APK lib folder
 cp "target/$RUST_ANDROID_TARGET/release/lib$RUST_PACKAGE_NAME.so" "$OUTPUT_DIR/app/lib/$ANDROID_TARGET/"
+
+# Step 4b: Copy the assets 
+cp "assets" "$OUTPUT_DIR/app/" -r
 
 
         # <activity android:name="android.app.NativeActivity"

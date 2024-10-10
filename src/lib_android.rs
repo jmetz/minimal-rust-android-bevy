@@ -1,223 +1,207 @@
-use android_activity::{
-    input::{InputEvent, KeyAction, KeyEvent, KeyMapChar, MotionAction},
-    AndroidApp, InputStatus, MainEvent, PollEvent,
-};
-use log::info;
+use bevy::window::WindowMode;
+use bevy::{color::palettes::css::PURPLE, prelude::*};
+use winit::event_loop::EventLoop;
 
-#[no_mangle]
-pub fn main(app: AndroidApp) {
-    android_logger::init_once(android_logger::Config::default()); // .with_max_level(log::Level::Info));
+#[cfg(target_os = "android")]
+use android_activity::AndroidApp;
+#[cfg(target_os = "android")]
+use winit::platform::android::EventLoopBuilderExtAndroid;
 
-    let mut quit = false;
-    let mut redraw_pending = true;
-    let mut native_window: Option<ndk::native_window::NativeWindow> = None;
-
-    let mut combining_accent = None;
-
-    while !quit {
-        app.poll_events(
-            Some(std::time::Duration::from_secs(1)), /* timeout */
-            |event| {
-                match event {
-                    PollEvent::Wake => {
-                        info!("Early wake up");
-                    }
-                    PollEvent::Timeout => {
-                        info!("Timed out");
-                        // Real app would probably rely on vblank sync via graphics API...
-                        redraw_pending = true;
-                    }
-                    PollEvent::Main(main_event) => {
-                        info!("Main event: {:?}", main_event);
-                        match main_event {
-                            MainEvent::SaveState { saver, .. } => {
-                                saver.store("foo://bar".as_bytes());
-                            }
-                            MainEvent::Pause => {}
-                            MainEvent::Resume { loader, .. } => {
-                                if let Some(state) = loader.load() {
-                                    if let Ok(uri) = String::from_utf8(state) {
-                                        info!("Resumed with saved state = {uri:#?}");
-                                    }
-                                }
-                            }
-                            MainEvent::InitWindow { .. } => {
-                                native_window = app.native_window();
-                                redraw_pending = true;
-                            }
-                            MainEvent::TerminateWindow { .. } => {
-                                native_window = None;
-                            }
-                            MainEvent::WindowResized { .. } => {
-                                redraw_pending = true;
-                            }
-                            MainEvent::RedrawNeeded { .. } => {
-                                redraw_pending = true;
-                            }
-                            MainEvent::InputAvailable { .. } => {
-                                redraw_pending = true;
-                            }
-                            MainEvent::ConfigChanged { .. } => {
-                                info!("Config Changed: {:#?}", app.config());
-                            }
-                            MainEvent::LowMemory => {}
-
-                            MainEvent::Destroy => quit = true,
-                            _ => { /* ... */ }
-                        }
-                    }
-                    _ => {}
-                }
-
-                if redraw_pending {
-                    if let Some(native_window) = &native_window {
-                        redraw_pending = false;
-
-                        // Handle input, via a lending iterator
-                        match app.input_events_iter() {
-                            Ok(mut iter) => loop {
-                                info!("Checking for next input event...");
-                                if !iter.next(|event| {
-                                    match event {
-                                        InputEvent::KeyEvent(key_event) => {
-                                            let combined_key_char = character_map_and_combine_key(
-                                                &app,
-                                                key_event,
-                                                &mut combining_accent,
-                                            );
-                                            info!("KeyEvent: combined key: {combined_key_char:?}")
-                                        }
-                                        InputEvent::MotionEvent(motion_event) => {
-                                            println!("action = {:?}", motion_event.action());
-                                            match motion_event.action() {
-                                                MotionAction::Up => {
-                                                    let pointer = motion_event.pointer_index();
-                                                    let pointer =
-                                                        motion_event.pointer_at_index(pointer);
-                                                    let x = pointer.x();
-                                                    let y = pointer.y();
-
-                                                    println!("POINTER UP {x}, {y}");
-                                                    if x < 200.0 && y < 200.0 {
-                                                        println!("Requesting to show keyboard");
-                                                        app.show_soft_input(true);
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                        InputEvent::TextEvent(state) => {
-                                            info!("Input Method State: {state:?}");
-                                        }
-                                        _ => {}
-                                    }
-
-                                    info!("Input Event: {event:?}");
-                                    InputStatus::Unhandled
-                                }) {
-                                    info!("No more input available");
-                                    break;
-                                }
-                            },
-                            Err(err) => {
-                                log::error!("Failed to get input events iterator: {err:?}");
-                            }
-                        }
-
-                        info!("Render...");
-                        dummy_render(native_window);
-                    }
-                }
-            },
-        );
-    }
+#[cfg(target_os = "android")]
+fn init_logging() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Trace)
+            .with_tag("hello-bevy"),
+    );
 }
 
-/// Tries to map the `key_event` to a `KeyMapChar` containing a unicode character or dead key accent
-///
-/// This shows how to take a `KeyEvent` and look up its corresponding `KeyCharacterMap` and
-/// use that to try and map the `key_code` + `meta_state` to a unicode character or a
-/// dead key that be combined with the next key press.
-fn character_map_and_combine_key(
-    app: &AndroidApp,
-    key_event: &KeyEvent,
-    combining_accent: &mut Option<char>,
-) -> Option<KeyMapChar> {
-    let device_id = key_event.device_id();
+#[cfg(not(target_os = "android"))]
+fn init_logging() {
+    env_logger::init();
+}
 
-    let key_map = match app.device_key_character_map(device_id) {
-        Ok(key_map) => key_map,
-        Err(err) => {
-            log::error!("Failed to look up `KeyCharacterMap` for device {device_id}: {err:?}");
-            return None;
-        }
-    };
+#[bevy_main]
+pub fn main() {
+    init_logging();
 
-    match key_map.get(key_event.key_code(), key_event.meta_state()) {
-        Ok(KeyMapChar::Unicode(unicode)) => {
-            // Only do dead key combining on key down
-            if key_event.action() == KeyAction::Down {
-                let combined_unicode = if let Some(accent) = combining_accent {
-                    match key_map.get_dead_char(*accent, unicode) {
-                        Ok(Some(key)) => {
-                            info!("KeyEvent: Combined '{unicode}' with accent '{accent}' to give '{key}'");
-                            Some(key)
-                        }
-                        Ok(None) => None,
-                        Err(err) => {
-                            log::error!("KeyEvent: Failed to combine 'dead key' accent '{accent}' with '{unicode}': {err:?}");
-                            None
-                        }
-                    }
-                } else {
-                    info!("KeyEvent: Pressed '{unicode}'");
-                    Some(unicode)
-                };
-                *combining_accent = None;
-                combined_unicode.map(|unicode| KeyMapChar::Unicode(unicode))
-            } else {
-                Some(KeyMapChar::Unicode(unicode))
+    App::new()
+        .insert_resource(ClearColor(Color::srgb(0.5, 0.5, 0.9)))
+        // .init_asset::<bevy::prelude::AudioSource>()
+        .add_plugins((DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                resizable: false,
+                mode: WindowMode::BorderlessFullscreen,
+                ..default()
+            }),
+            ..default()
+        }),))
+        .init_resource::<Actions>()
+        .add_systems(Startup, (setup, setup_audio, setup_player))
+        .add_systems(Update, (update, handle_touch, move_player))
+        .run();
+}
+
+// INFO: If needed, use the following to have different mobile and desktop
+//       setups; remember to call this function in gen/bin/desktop.rs
+//
+// pub fn main_desktop() {
+//     init_logging();
+//     App::new()
+//         .insert_resource(ClearColor(Color::srgb(0.5, 0.5, 0.9)))
+//         // .init_asset::<bevy::prelude::AudioSource>()
+//         .add_plugins((DefaultPlugins.set(WindowPlugin {
+//             primary_window: Some(Window {
+//                 resizable: false,
+//                 mode: WindowMode::BorderlessFullscreen,
+//                 ..default()
+//             }),
+//             ..default()
+//         }),))
+//         .init_resource::<Actions>()
+//         .add_systems(Startup, (setup, setup_audio, setup_player))
+//         .add_systems(Update, (update, handle_touch, move_player))
+//         .run();
+//}
+
+#[derive(Component)]
+pub struct Player;
+
+fn setup(mut commands: Commands) {
+    commands.spawn(Camera2dBundle::default());
+}
+
+#[derive(Resource, Deref)]
+struct MoveSound(Handle<AudioSource>);
+
+fn setup_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // Create sound resource
+    let sound = asset_server.load("sounds/boing.ogg");
+    commands.insert_resource(MoveSound(sound));
+    // PLACEHOLDER: In v0.15 looks like this might be the way to go
+    // AudioPlayer::<AudioSource>(asset_server.load("sounds/boing.ogg")),
+}
+
+fn setup_player(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands
+        .spawn(SpriteBundle {
+            texture: asset_server.load("bevy.png"),
+            transform: Transform::from_translation(Vec3::new(0., 0., 1.)),
+            ..Default::default()
+        })
+        .insert(Player);
+}
+
+#[derive(Default, Resource)]
+pub struct Actions {
+    pub player_movement: Option<Vec2>,
+}
+
+pub enum GameControl {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl GameControl {
+    pub fn pressed(&self, keyboard_input: &Res<ButtonInput<KeyCode>>) -> bool {
+        match self {
+            GameControl::Up => {
+                keyboard_input.pressed(KeyCode::KeyW) || keyboard_input.pressed(KeyCode::ArrowUp)
+            }
+            GameControl::Down => {
+                keyboard_input.pressed(KeyCode::KeyS) || keyboard_input.pressed(KeyCode::ArrowDown)
+            }
+            GameControl::Left => {
+                keyboard_input.pressed(KeyCode::KeyA) || keyboard_input.pressed(KeyCode::ArrowLeft)
+            }
+            GameControl::Right => {
+                keyboard_input.pressed(KeyCode::KeyD) || keyboard_input.pressed(KeyCode::ArrowRight)
             }
         }
-        Ok(KeyMapChar::CombiningAccent(accent)) => {
-            if key_event.action() == KeyAction::Down {
-                info!("KeyEvent: Pressed 'dead key' combining accent '{accent}'");
-                *combining_accent = Some(accent);
+    }
+}
+
+pub fn get_movement(control: GameControl, input: &Res<ButtonInput<KeyCode>>) -> f32 {
+    if control.pressed(input) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+pub const FOLLOW_EPSILON: f32 = 5.;
+
+pub fn handle_touch(
+    mut actions: ResMut<Actions>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    touch_input: Res<Touches>,
+    player: Query<&Transform, With<Player>>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) {
+    let mut player_movement = Vec2::new(
+        get_movement(GameControl::Right, &keyboard_input)
+            - get_movement(GameControl::Left, &keyboard_input),
+        get_movement(GameControl::Up, &keyboard_input)
+            - get_movement(GameControl::Down, &keyboard_input),
+    );
+
+    if let Some(touch_position) = touch_input.first_pressed_position() {
+        let (camera, camera_transform) = camera.single();
+        if let Some(touch_position) = camera.viewport_to_world_2d(camera_transform, touch_position)
+        {
+            let diff = touch_position - player.single().translation.xy();
+            if diff.length() > FOLLOW_EPSILON {
+                player_movement = diff.normalize();
             }
-            Some(KeyMapChar::CombiningAccent(accent))
         }
-        Ok(KeyMapChar::None) => {
-            // Leave any combining_accent state in tact (seems to match how other
-            // Android apps work)
-            info!("KeyEvent: Pressed non-unicode key");
-            None
-        }
-        Err(err) => {
-            log::error!("KeyEvent: Failed to get key map character: {err:?}");
-            *combining_accent = None;
-            None
+    }
+
+    if player_movement != Vec2::ZERO {
+        actions.player_movement = Some(player_movement.normalize());
+    } else {
+        actions.player_movement = None;
+    }
+}
+
+fn move_player(
+    mut commands: Commands,
+    time: Res<Time>,
+    actions: Res<Actions>,
+    mut player_query: Query<&mut Transform, With<Player>>,
+    audio: Res<MoveSound>,
+    audio_control: Query<&AudioSink>,
+) {
+    if actions.player_movement.is_none() {
+        return;
+    }
+    let speed = 150.;
+    let movement = Vec3::new(
+        actions.player_movement.unwrap().x * speed * time.delta_seconds(),
+        actions.player_movement.unwrap().y * speed * time.delta_seconds(),
+        0.,
+    );
+    for mut player_transform in &mut player_query {
+        player_transform.translation += movement;
+    }
+    // commands.spawn(AudioBundle {
+    //     source: audio.clone(),
+    //     // auto-despawn the entity when playback finishes
+    //     settings: PlaybackSettings::DESPAWN,
+    // });
+    match audio_control.get_single() {
+        // Already playing move sound
+        Ok(_) => {}
+        Err(_) => {
+            commands.spawn((AudioBundle {
+                source: audio.clone(),
+                settings: PlaybackSettings::DESPAWN,
+                ..default()
+            },));
         }
     }
 }
 
-/// Post a NOP frame to the window
-///
-/// Since this is a bare minimum test app we don't depend
-/// on any GPU graphics APIs but we do need to at least
-/// convince Android that we're drawing something and are
-/// responsive, otherwise it will stop delivering input
-/// events to us.
-fn dummy_render(native_window: &ndk::native_window::NativeWindow) {
-    unsafe {
-        let mut buf: ndk_sys::ANativeWindow_Buffer = std::mem::zeroed();
-        let mut rect: ndk_sys::ARect = std::mem::zeroed();
-        ndk_sys::ANativeWindow_lock(
-            native_window.ptr().as_ptr() as _,
-            &mut buf as _,
-            &mut rect as _,
-        );
-        // Note: we don't try and touch the buffer since that
-        // also requires us to handle various buffer formats
-        ndk_sys::ANativeWindow_unlockAndPost(native_window.ptr().as_ptr() as _);
-    }
-}
+// PLACEHOLDER: Do other scene updates here
+fn update(mut commands: Commands) {}
